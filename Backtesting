@@ -1,0 +1,101 @@
+import pandas as pd
+from ta.trend import EMAIndicator, ADXIndicator
+from ta.momentum import RSIIndicator
+from ta.volatility import AverageTrueRange
+from utils import is_trading_session
+
+def add_indicators(df, p):
+    df['ema_fast'] = EMAIndicator(df['close'], p['ema_fast']).ema_indicator()
+    df['ema_slow'] = EMAIndicator(df['close'], p['ema_slow']).ema_indicator()
+    df['rsi'] = RSIIndicator(df['close'], 14).rsi()
+    df['adx'] = ADXIndicator(df['high'], df['low'], df['close'], 14).adx()
+    df['atr'] = AverageTrueRange(df['high'], df['low'], df['close'], 14).average_true_range()
+    return df
+
+def get_signal(row, p):
+    if row['adx'] <= p['adx_min']:
+        return None
+    if row['ema_fast'] > row['ema_slow'] and p['rsi_buy_min'] < row['rsi'] < p['rsi_buy_max']:
+        return "BUY"
+    if row['ema_fast'] < row['ema_slow'] and p['rsi_sell_min'] < row['rsi'] < p['rsi_sell_max']:
+        return "SELL"
+    return None
+
+def backtest(df, p, balance=10000, risk_pct=0.01):
+    equity, trades = [], []
+    in_trade, trade = False, {}
+
+    for i in range(1, len(df)):
+        row = df.iloc[i]
+        ts = df.index[i]
+        equity.append(balance)
+
+        # EXIT
+        if in_trade:
+            if trade['dir'] == "BUY":
+                if row['low'] <= trade['sl']:
+                    balance -= trade['risk']
+                    trade['result'] = -trade['risk']
+                    trades.append(trade)
+                    in_trade = False
+                elif row['high'] >= trade['tp']:
+                    balance += trade['risk'] * p['rr']
+                    trade['result'] = trade['risk'] * p['rr']
+                    trades.append(trade)
+                    in_trade = False
+
+            if trade['dir'] == "SELL":
+                if row['high'] >= trade['sl']:
+                    balance -= trade['risk']
+                    trade['result'] = -trade['risk']
+                    trades.append(trade)
+                    in_trade = False
+                elif row['low'] <= trade['tp']:
+                    balance += trade['risk'] * p['rr']
+                    trade['result'] = trade['risk'] * p['rr']
+                    trades.append(trade)
+                    in_trade = False
+
+        # ENTRY
+        if not in_trade:
+            if not is_trading_session(ts, p['session']):
+                continue
+            signal = get_signal(row, p)
+            if not signal or row['atr'] == 0:
+                continue
+
+            risk = balance * risk_pct
+            sl_dist = p['atr_sl'] * row['atr']
+            tp_dist = sl_dist * p['rr']
+
+            trade = {
+                "dir": signal,
+                "risk": risk,
+                "sl": row['close'] - sl_dist if signal == "BUY" else row['close'] + sl_dist,
+                "tp": row['close'] + tp_dist if signal == "BUY" else row['close'] - tp_dist,
+                "rsi": row['rsi'],
+                "adx": row['adx'],
+                "session": p['session']
+            }
+            in_trade = True
+
+    return trades, equity
+
+def analyse(trades, equity):
+    df = pd.DataFrame(trades)
+    if df.empty:
+        return None
+    wins = df[df['result'] > 0]
+    win_rate = len(wins) / len(df) * 100
+    expectancy = df['result'].mean()
+    peak, max_dd = equity[0], 0
+    for e in equity:
+        peak = max(peak, e)
+        max_dd = max(max_dd, peak - e)
+    return {
+        "trades": len(df),
+        "win_rate": round(win_rate, 2),
+        "expectancy": round(expectancy, 2),
+        "max_dd": round(max_dd, 2),
+        "final_balance": round(equity[-1], 2)
+    }
